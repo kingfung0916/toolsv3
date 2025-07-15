@@ -7,6 +7,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/qr-scanner@1.4.2/qr-scanner.umd.min.js"></script>
     <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+    <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <script>
         tailwind.config = {
             theme: {
@@ -145,9 +146,10 @@
                 <div class="space-y-4">
                     <div>
                         <label class="block text-sm font-medium mb-2">匯入教具清單</label>
-                        <input type="file" id="csvInput" accept=".csv" 
+                        <input type="file" id="csvInput" accept=".csv,.xlsx,.xls" 
                                class="w-full text-base px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700">
-                        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">CSV格式：編號,教具名稱</p>
+                        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">支援格式：CSV、Excel (.xlsx/.xls)</p>
+                        <p class="text-xs text-gray-500 dark:text-gray-400">格式：編號,教具名稱</p>
                     </div>
                     
                     <button id="exportBtn" 
@@ -642,32 +644,113 @@
                 const file = event.target.files[0];
                 if (!file) return;
 
+                const fileName = file.name.toLowerCase();
+                const fileExtension = fileName.split('.').pop();
+
+                if (fileExtension === 'csv') {
+                    this.parseCSV(file);
+                } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
+                    this.parseExcel(file);
+                } else {
+                    MessageHandler.show('不支援的檔案格式，請使用 CSV 或 Excel 檔案', 'error');
+                }
+            }
+
+            parseCSV(file) {
                 Papa.parse(file, {
                     header: true,
                     skipEmptyLines: true,
                     complete: (results) => {
                         if (results.errors.length > 0) {
                             MessageHandler.show('CSV檔案格式錯誤', 'error');
+                            console.error('CSV parse errors:', results.errors);
                             return;
                         }
 
-                        const tools = results.data
-                            .map(row => ({
-                                id: (row.編號 || row.id || '').toString().trim(),
-                                name: (row.教具名稱 || row.name || '').toString().trim(),
-                                attendanceCount: 0,
-                                lastAttendance: ''
-                            }))
-                            .filter(tool => tool.id && tool.name);
-
+                        const tools = this.processImportData(results.data);
                         this.appState.setTools(tools);
-                        MessageHandler.show(`成功匯入 ${tools.length} 件教具`, 'success');
+                        MessageHandler.show(`✅ 成功匯入 ${tools.length} 件教具 (CSV格式)`, 'success');
                     },
                     error: (error) => {
                         console.error('CSV parse error:', error);
                         MessageHandler.show('讀取CSV檔案失敗', 'error');
                     }
                 });
+            }
+
+            parseExcel(file) {
+                const reader = new FileReader();
+                
+                reader.onload = (e) => {
+                    try {
+                        const data = e.target.result;
+                        const workbook = XLSX.read(data, { type: 'binary' });
+                        
+                        // 讀取第一個工作表
+                        const firstSheetName = workbook.SheetNames[0];
+                        const worksheet = workbook.Sheets[firstSheetName];
+                        
+                        // 轉換為JSON格式
+                        const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                        
+                        if (jsonData.length < 2) {
+                            MessageHandler.show('Excel檔案內容不足，請確認有標題列和資料列', 'error');
+                            return;
+                        }
+
+                        // 將陣列格式轉換為物件格式
+                        const headers = jsonData[0];
+                        const rows = jsonData.slice(1);
+                        
+                        const objectData = rows.map(row => {
+                            const obj = {};
+                            headers.forEach((header, index) => {
+                                obj[header] = row[index] || '';
+                            });
+                            return obj;
+                        });
+
+                        const tools = this.processImportData(objectData);
+                        this.appState.setTools(tools);
+                        MessageHandler.show(`✅ 成功匯入 ${tools.length} 件教具 (Excel格式)`, 'success');
+                        
+                    } catch (error) {
+                        console.error('Excel parse error:', error);
+                        MessageHandler.show('讀取Excel檔案失敗，請確認檔案格式正確', 'error');
+                    }
+                };
+                
+                reader.onerror = () => {
+                    MessageHandler.show('檔案讀取失敗', 'error');
+                };
+                
+                reader.readAsBinaryString(file);
+            }
+
+            processImportData(data) {
+                return data
+                    .map(row => {
+                        // 支援多種欄位名稱
+                        const id = (
+                            row['編號'] || row['编号'] || row['ID'] || row['id'] || 
+                            row['教具編號'] || row['教具编号'] || row['Tool ID'] || row['ToolID'] ||
+                            row['代碼'] || row['代码'] || row['Code'] || row['code'] || ''
+                        ).toString().trim();
+
+                        const name = (
+                            row['教具名稱'] || row['教具名称'] || row['名稱'] || row['名称'] || 
+                            row['Name'] || row['name'] || row['Tool Name'] || row['ToolName'] ||
+                            row['品名'] || row['物品'] || row['Item'] || row['item'] || ''
+                        ).toString().trim();
+
+                        return {
+                            id: id,
+                            name: name,
+                            attendanceCount: 0,
+                            lastAttendance: ''
+                        };
+                    })
+                    .filter(tool => tool.id && tool.name); // 過濾掉空白資料
             }
 
             exportAttendance() {
